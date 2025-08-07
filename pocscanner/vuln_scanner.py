@@ -111,3 +111,4 @@ if __name__ == "__main__":
     poc_path = 'pocs/http/cves/2023/CVE-2023-3368.yaml'
     Asset_file = '../Assets/asset.json'
     scanner(poc_path=poc_path, assets=Asset_file)
+
