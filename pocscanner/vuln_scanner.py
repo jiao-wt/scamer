@@ -100,7 +100,7 @@ def scanner(assets, protocol='https', poc_path=None):
     else:
         print('获取poc')
         pocs = get_poc(assets)
-        print(f'共匹配到{len(pocs[0].get('matched_pocs'))}个poc')
+        print(f"共匹配到{len(pocs[0].get('matched_pocs'))}个poc")
         for num in range(len(pocs[0].get('matched_pocs'))):
             if pocs[0].get('matched_pocs')[num]:
                 print(f"\n开始根据{pocs[0].get('matched_pocs')[num]['poc_path']}进行扫描\n")
