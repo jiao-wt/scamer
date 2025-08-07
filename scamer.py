@@ -1,6 +1,7 @@
 import argparse
 import port_scan
 import domain_scan
+import pocscanner.vuln_scanner
 
 
 class Scamer:
@@ -18,16 +19,21 @@ class Scamer:
         # 创建子域名扫描子解析器
         self.setup_domainscan_parser()
 
+        self.setup_vulnscan_parser()
+
+
         self.args = self.parser.parse_args()
 
     def setup_portscan_parser(self):
         """设置端口扫描子解析器的参数"""
         parser = self.subparsers.add_parser('portscan', help='端口扫描模式')
-        parser.add_argument('target', help='目标IP地址或域名')
+        parser.add_argument('-t', '--target', help='目标IP地址或域名')
         parser.add_argument('-p', '--ports', default=','.join(map(str, port_scan.COMMON_PORTS)),
                             help='扫描的端口范围，默认扫描常见端口，格式为"80,443"或"1-100"')
-        parser.add_argument('-t', '--timeout', type=float, default=1.0, help='连接超时时间(秒)')
-        parser.add_argument('-w', '--workers', type=int, default=50, help='最大线程数')
+        parser.add_argument('--timeout', type=float, default=1.0, help='连接超时时间(秒)')
+        parser.add_argument('--workers', type=int, default=50, help='最大线程数')
+        parser.add_argument('-f', '--file', help='包含目标列表的文件')
+        parser.add_argument('-s', '--save', action='store_true', help="保存结果(json格式)")
 
     def portscan_run(self):
         """执行端口扫描"""
@@ -42,24 +48,27 @@ class Scamer:
             ports = port_scan.COMMON_PORTS
 
         portscan = port_scan.PortScanner(
-            target=self.args.target,
+            target='',
             ports=ports,
             timeout=self.args.timeout,
             max_workers=self.args.workers,
         )
 
-        scan_results = portscan.run_scan()
+        if self.args.file:
+            scan_results = portscan.scan_targets_from_file(self.args.file)
+            if self.args.save:
+                portscan.save_json_results(scan_results, 'Assets/output_file.json')
 
-        identified_results = portscan.identify_services(scan_results)
+        elif self.args.target:
+            scan_results = portscan.run_scan()
+            identified_results = portscan.identify_services(scan_results)
 
-        if identified_results:
-            print("\n扫描结果汇总：")
-            print("端口\t\t状态\t\t\t服务")
-            print("-" * 50)
-            for port, status, identified in identified_results:
-                print(f"{port}\t\t{status}\t\t{identified}")
+            if self.args.save:
+                portscan.save_json_results(identified_results)
+
         else:
-            print("\n未发现开放端口")
+            print("请指定目标(-t)或目标文件(-f)")
+
 
     def setup_domainscan_parser(self):
         parser = self.subparsers.add_parser("domainscan", help='子域名扫描模式')
@@ -76,11 +85,27 @@ class Scamer:
         sublist3r = domain_scan.Sublist3rWapper(sublist3r_path)
         sublist3r.scan(target=target, threads=threads, bruteforce=bruteforce)
 
+    def setup_vulnscan_parser(self):
+        parser = self.subparsers.add_parser("vulnscan", help='漏洞模式')
+        parser.add_argument('-a', '--assets', required=True, help='指定目标资产')
+        parser.add_argument('-P', '--path', help='指定poc路径')
+        parser.add_argument('--protocol', default='https',help='指定使用协议(http/https)')
+
+    def vulnscan_run(self):
+        Asset_file = self.args.assets
+        assets = '../Assets/'+Asset_file
+        poc_path = self.args.threads
+        protocol = self.args.bruteforce
+        pocscanner.vuln_scanner.scanner(poc_path=poc_path, assets=assets, protocol=protocol)
+
+
     def run(self):
         if self.args.mode == 'portscan':
             self.portscan_run()
         elif self.args.mode == 'domainscan':
             self.domainscan_run()
+        elif self.args.mode == 'vulnscan':
+            self.vulnscan_run()
 
 if __name__ == '__main__':
     scamer = Scamer()
