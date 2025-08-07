@@ -1,253 +1,217 @@
-# service_detector.py
 import socket
 import requests
 import re
+import time
 
-# 服务识别特征字典
+# 服务识别特征字典（精简版）
 SERVICE_SIGNATURES = {
+    # 数据库服务
+    'mysql': {
+        'ports': [3306, 3307],
+        'probe': b'',
+        'response': b'\x0a',
+        'banner_offset': 0,
+        'version_re': r'([5-8]\.\d+\.\d+)',
+        'decode': 'latin1'
+    },
+    'postgresql': {
+        'ports': [5432],
+        'probe': b'\x00\x00\x03\x00\x00\x00\x00\x00\x00\x00',
+        'response': b'PostgreSQL',
+        'version_re': r'PostgreSQL ([\d.]+)'
+    },
+    'mongodb': {
+        'ports': [27017, 27018],
+        'probe': b'\x31\x00\x00\x00\x02\x01\x00\x00\x02\x61\x64\x6d\x69\x6e\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
+        'response': b'ismaster',
+        'version_re': r'"version"\s*:\s*"([\d.]+)"'
+    },
+    'mssql': {
+        'ports': [1433],
+        'probe': b'\x14\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
+        'response': b'TDS',
+        'version_re': r'SQL Server ([\d.]+)'
+    },
+    'oracle': {
+        'ports': [1521],
+        'probe': b'\x00\x00\x00\x28\x01\x00\x00\x05\x00\x00\x00\x00\x4f\x52\x41\x43\x4c\x45\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
+        'response': b'ORACLE',
+        'version_re': r'Oracle Database ([\d.]+)'
+    },
+
+    # 缓存/消息队列服务
     'redis': {
         'ports': [6379],
         'probe': '*1\r\n$4\r\nPING\r\n',
         'response': '+PONG',
-        'banner_offset': 0
+        'version_re': r'Redis server v=([\d.]+)'
     },
-    'mysql': {
-        'ports': [3306],
-        'probe': b'\x01\x00\x00\x00\x0a',  # 简单的握手包
-        'response': b'MySQL',
-        'banner_offset': 10
+    'memcached': {
+        'ports': [11211],
+        'probe': 'stats\r\n',
+        'response': 'STAT',
+        'version_re': r'version ([\d.]+)'
     },
+    'rabbitmq': {
+        'ports': [5672, 15672],
+        'probe': b'\x01\x00\x00\x00\x08\x00\x00\x00',
+        'response': b'AMQP',
+        'version_re': r'RabbitMQ ([\d.]+)'
+    },
+
+    # 网络服务
     'ssh': {
         'ports': [22],
-        'probe': '',  # SSH服务会主动发送banner
+        'probe': '',
         'response': 'SSH-',
-        'banner_offset': 0
+        'version_re': r'SSH-([\d.]+)'
     },
     'ftp': {
         'ports': [21],
-        'probe': '',  # FTP服务会主动发送banner
+        'probe': '',
         'response': '220',
-        'banner_offset': 0
+        'version_re': r'(\d+\.\d+\.\d+)'
     },
+    'smtp': {
+        'ports': [25, 465, 587],
+        'probe': 'EHLO localhost\r\n',
+        'response': '250',
+        'version_re': r'SMTP ([\d.]+)'
+    },
+
+    # Web服务
     'http': {
         'ports': [80, 8080, 8000, 5000],
-        'probe': 'GET / HTTP/1.1\r\nHost: localhost\r\n\r\n',
+        'probe': 'GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n',
         'response': 'HTTP/',
-        'banner_offset': 0
+        'version_re': r'HTTP/([\d.]+)',
+        'web_service': True
     },
     'https': {
-        'ports': [443],
-        'probe': '',  # HTTPS需要SSL握手，这里简化处理
+        'ports': [443, 8443],
+        'probe': '',
         'response': '',
-        'banner_offset': 0,
+        'web_service': True,
         'tls': True
     }
 }
 
-# Web CMS 指纹识别规则
-CMS_FINGERPRINTS = {
-    'WordPress': {
-        'headers': [
-            ('X-Powered-By', 'WordPress'),
-            ('Set-Cookie', 'wordpress'),
-        ],
-        'content': [
-            r'wp-content',
-            r'wp-includes',
-            r'WordPress.com',
-        ],
-        'files': {
-            '/wp-login.php': r'WordPress',
-            '/wp-admin/': r'WordPress',
-        }
-    },
-    'Joomla': {
-        'headers': [
-            ('X-Powered-By', 'Joomla'),
-        ],
-        'content': [
-            r'Joomla!',
-            r'joomla\.js',
-        ],
-        'files': {
-            '/administrator/': r'Joomla',
-        }
-    },
-    'Drupal': {
-        'headers': [
-            ('X-Generator', 'Drupal'),
-        ],
-        'content': [
-            r'drupal\.js',
-            r'class="node-',
-        ],
-        'files': {
-            '/user/login': r'Drupal',
-        }
-    },
-    'Discuz': {
-        'content': [
-            r'discuz\.js',
-            r'Powered by Discuz!',
-        ],
-        'files': {
-            '/admin.php': r'Discuz!',
-        }
-    },
-    'Apache': {
-        'headers': [
-            ('Server', 'Apache'),
-        ],
-    },
-    'Nginx': {
-        'headers': [
-            ('Server', 'nginx'),
-        ],
-    },
-    'IIS': {
-        'headers': [
-            ('Server', 'Microsoft-IIS'),
-        ],
-    }
+# Web服务器版本提取规则
+WEB_SERVER_VERSION = {
+    'Apache': r'Apache/([\d.]+)',
+    'Nginx': r'nginx/([\d.]+)',
+    'IIS': r'Microsoft-IIS/([\d.]+)',
+    'Tomcat': r'Apache-Coyote/([\d.]+)|Tomcat/([\d.]+)'
 }
 
 
 class ServiceDetector:
     def __init__(self, target, timeout=1.0):
-        """初始化服务识别器"""
         self.target = target
         self.timeout = timeout
-        # 设置requests超时时间
-        self.request_timeout = min(5.0, timeout * 3)  # 至少5秒，或超时时间的3倍
+        self.request_timeout = min(5.0, timeout * 3)
 
     def identify_service(self, port, sock=None):
-        """识别端口上运行的具体服务"""
-        # 根据端口号初步判断
+        """仅返回服务名/版本号（如 mysql/5.7.26）"""
         for service, info in SERVICE_SIGNATURES.items():
             if port in info['ports']:
                 try:
-                    if sock:
-                        # 使用已连接的socket
-                        s = sock.dup()
-                        s.settimeout(self.timeout)
-                    else:
-                        # 创建新的socket连接
-                        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                        s.settimeout(self.timeout)
+                    # 处理连接
+                    s = sock.dup() if sock else socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    if not sock:
+                        s.settimeout(self.timeout * 2)
                         s.connect((self.target, port))
 
-                    # 对于需要发送探测包的服务
-                    if info['probe']:
-                        if isinstance(info['probe'], str):
-                            s.sendall(info['probe'].encode())
-                        else:
-                            s.sendall(info['probe'])
+                    # 发送探测包
+                    if info.get('probe'):
+                        probe = info['probe'].encode() if isinstance(info['probe'], str) else info['probe']
+                        s.sendall(probe)
+                        time.sleep(0.1)
 
-                    # 接收响应
-                    response = s.recv(1024)
-                    if isinstance(response, bytes):
-                        response_str = response.decode('utf-8', errors='ignore')
-                    else:
-                        response_str = response
+                    # 接收响应并解码
+                    response = s.recv(2048)
+                    decode = info.get('decode', 'utf-8')
+                    response_str = response.decode(decode, errors='replace')
 
-                    # 检查响应是否匹配服务特征
-                    if info['response'] in response_str:
-                        # 提取banner信息
-                        banner = response_str[info['banner_offset']:].strip()
+                    # 匹配服务特征
+                    if self._match_response(info['response'], response_str):
+                        # 提取版本
+                        banner = response_str[info.get('banner_offset', 0):]
+                        version = self._extract_version(banner, info['version_re'])
 
-                        # 对于Web服务，进行更详细的指纹识别
-                        if service in ['http', 'https']:
-                            web_info = self.identify_web_service(port)
-                            return f"{service} ({web_info})" if web_info else service
+                        # 处理Web服务
+                        if info.get('web_service'):
+                            return self._identify_web_service(port, service)
 
-                        return f"{service} ({banner[:50]}...)" if banner else service
+                        # 基础服务格式
+                        return f"{service}/{version}" if version else service
 
-                except Exception as e:
-                    # 识别失败，返回基于端口的初步判断
-                    return service
+                except:
+                    continue
+                finally:
+                    if not sock:
+                        s.close()
 
-        # 如果无法识别，返回基于端口的服务名称
+        # 未匹配到特征的默认处理
         try:
             return socket.getservbyport(port)
         except:
             return "unknown"
 
-    def identify_web_service(self, port):
-        """识别Web服务的详细信息，包括CMS类型和服务器软件"""
-        # 构建URL
-        scheme = 'https' if port == 443 else 'http'
-        base_url = f"{scheme}://{self.target}:{port}"
+    def _match_response(self, expected, actual):
+        if isinstance(expected, bytes):
+            expected = expected.decode('utf-8', errors='ignore')
+        return expected in actual
 
+    def _extract_version(self, banner, pattern):
+        """提取版本号，无额外输出"""
+        if not pattern or not banner:
+            return ""
+
+        # 正则匹配
+        match = re.search(pattern, banner)
+        if match:
+            version = match.group(1).strip()
+            if re.match(r'^\d+\.\d+\.\d+$', version):
+                return version
+
+        # MySQL专用容错
+        if 'mysql' in banner.lower():
+            candidates = re.findall(r'\b(5|8)\.\d+\.\d+\b', banner)
+            return candidates[0] if candidates else ""
+
+        return ""
+
+    def _identify_web_service(self, port, service):
+        """识别Web服务（仅返回 服务/版本）"""
         try:
-            # 发送HEAD请求获取响应头
-            head_resp = requests.head(base_url, timeout=self.request_timeout, verify=False)
+            scheme = 'https' if service == 'https' else 'http'
+            head_resp = requests.head(
+                f"{scheme}://{self.target}:{port}",
+                timeout=self.request_timeout,
+                verify=False,
+                allow_redirects=True
+            )
+            server_str = head_resp.headers.get('Server', service)
 
-            # 发送GET请求获取页面内容
-            get_resp = requests.get(base_url, timeout=self.request_timeout, verify=False)
+            # 提取Web服务器版本
+            for server, pattern in WEB_SERVER_VERSION.items():
+                match = re.search(pattern, server_str, re.IGNORECASE)
+                if match:
+                    version = next((g for g in match.groups() if g), "")
+                    return f"{server}/{version}" if version else server
 
-            # 检查robots.txt文件
-            robots_detected = self.check_robots_txt(base_url)
+            # 未匹配到已知服务器时
+            parts = server_str.split('/')
+            return f"{parts[0]}/{parts[1]}" if len(parts) > 1 else server_str
 
-            # 分析响应，识别CMS和服务器信息
-            cms_info = self.analyze_web_fingerprint(head_resp, get_resp)
-
-            # 获取服务器信息
-            server_info = head_resp.headers.get('Server', 'Unknown Server')
-
-            # 构建完整的Web服务信息
-            web_info = f"Server: {server_info}"
-            if cms_info:
-                web_info += f", CMS: {cms_info}"
-            if robots_detected:
-                web_info += ", robots.txt detected"
-
-            return web_info
-
-        except Exception as e:
-            return f"Error: {str(e)[:30]}"
-
-    def analyze_web_fingerprint(self, head_resp, get_resp):
-        """分析Web指纹，识别CMS类型"""
-        matched_cms = []
-
-        # 检查所有已知的CMS指纹
-        for cms, rules in CMS_FINGERPRINTS.items():
-            score = 0
-            total = 0
-
-            # 检查响应头
-            if 'headers' in rules:
-                for header_name, pattern in rules['headers']:
-                    total += 1
-                    if header_name.lower() in [h.lower() for h in head_resp.headers]:
-                        header_value = head_resp.headers.get(header_name)
-                        if header_value and pattern.lower() in header_value.lower():
-                            score += 1
-
-            # 检查页面内容
-            if 'content' in rules:
-                for pattern in rules['content']:
-                    total += 1
-                    if re.search(pattern, get_resp.text, re.IGNORECASE):
-                        score += 1
-
-            # 检查特殊文件(这里只做标记，实际检测在单独的函数中)
-            if 'files' in rules:
-                total += len(rules['files'])
-                # 这里不实际请求，只作为潜在匹配的参考
-                score += 0  # 实际检测会在单独的函数中进行
-
-            # 如果匹配度超过50%，认为是该CMS
-            if total > 0 and score / total >= 0.5:
-                matched_cms.append(cms)
-
-        return ", ".join(matched_cms) if matched_cms else "Unknown"
-
-    def check_robots_txt(self, base_url):
-        """检查网站是否存在robots.txt文件"""
-        try:
-            robots_url = f"{base_url}/robots.txt"
-            resp = requests.get(robots_url, timeout=self.request_timeout, verify=False)
-            return resp.status_code == 200 and "User-agent" in resp.text
         except:
-            return False
+            return service
+
+    # 移除所有打印语句，确保无额外输出
+
+
+if __name__ == "__main__":
+    detector = ServiceDetector("127.0.0.1", timeout=2.0)
+    print(detector.identify_service(3306))  # 输出示例: mysql/5.7.26
+    print(detector.identify_service(80))  # 输出示例: Apache/2.4.39
