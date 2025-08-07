@@ -1,0 +1,8 @@
+[
+  {
+    "ip": "eci-2zef3nsgswrnizep6m1p.cloudeci1.ichunqiu.com",
+    "port": 80,
+    "service": "Chamilo LMS",
+    "version": "1.11.20"
+  }
+]
