@@ -1,0 +1,10 @@
+argparse
+PyYAML
+dnspython
+lxml
+jsonpath_ng
+idna
+packaging
+ply
+requests
+urllib3
